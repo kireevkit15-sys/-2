@@ -98,3 +98,31 @@ $('#registry').onclick=()=>{if($('#detailDialog').open)$('#detailDialog').close(
 document.addEventListener('click',action(async e=>{const close=e.target.closest('.close');if(close){close.closest('dialog').close();return;}const open=e.target.closest('[data-open]');if(open){e.preventDefault();await openSample(open.dataset.open);}}));
 $('#detailDialog').addEventListener('close',()=>{if(!$('#detailDialog').open)history.replaceState(null,'','/');});
 (async()=>{try{await refresh();const id=new URLSearchParams(location.search).get('sample');if(id)await openSample(id);}catch(e){toast(e.message);}})();
+$('#fieldbook').onclick=()=>{
+  if(!filteredSamples.length){toast('В выборке нет проб');return;}
+  $('#bookCount').textContent=`В выборке ${filteredSamples.length} проб. Позиции в книжке отсчитываются по профилям и точкам.`;
+  $('#bookStart').max=filteredSamples.length;$('#bookStart').value=1;$('#bookLimit').value=Math.min(100,filteredSamples.length);
+  $('#bookPreview').hidden=true;$('#printBook').disabled=true;$('#bookSummary').textContent='';$('#bookDialog').showModal();
+};
+$('#bookForm').oninput=()=>{$('#printBook').disabled=true;$('#bookSummary').textContent='Сформируйте предпросмотр с новыми параметрами.';};
+$('#bookForm').onsubmit=action(async e=>{
+  e.preventDefault();const start=Number($('#bookStart').value),count=Number($('#bookLimit').value);
+  if(!Number.isInteger(start)||start<1||start>filteredSamples.length||!Number.isInteger(count)||count<1||count>100)throw new Error('Проверьте диапазон книжки: от 1 до 100 проб');
+  const button=e.target.querySelector('[type="submit"]');button.disabled=true;$('#printBook').disabled=true;$('#bookSummary').textContent='Готовим страницы и QR-коды…';
+  try{
+    const list=GeoBooklet.ordered(filteredSamples).slice(start-1,start-1+count);
+    const mode=$('#bookMode').value;
+    const result=GeoBooklet.build(list,{perPage:$('#bookPerPage').value,mode,base:base(),date:new Date().toLocaleDateString('ru-RU')});
+    const frame=$('#bookPreview');
+    await new Promise((resolve,reject)=>{frame.onload=resolve;frame.onerror=()=>reject(new Error('Не удалось загрузить предпросмотр'));frame.srcdoc=result.html;});
+    await Promise.all([...frame.contentDocument.images].map(img=>img.decode()));
+    await frame.contentDocument.fonts.ready;
+    frame.hidden=false;
+    $('#bookSummary').textContent=`Проб: ${list.length} · Страниц A5: ${result.pages} (включая обложку и заметки)${mode==='booklet'?` · Тетрадей: ${result.signatures} · Листов A4: ${result.pages/4}`:''}. Перед печатью проверьте читаемость QR и адрес сервера.`;
+    $('#printBook').disabled=false;
+  }finally{button.disabled=false;}
+});
+$('#printBook').onclick=action(()=>{
+  if($('#printBook').disabled)return;
+  $('#bookPreview').contentWindow.focus();$('#bookPreview').contentWindow.print();
+});

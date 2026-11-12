@@ -21,7 +21,7 @@ def main(argv=None):
         raise RuntimeError('Требуется Python 3.10 или новее. Установите его с python.org.')
     if not 1 <= args.port <= 65535:
         raise RuntimeError('Порт должен быть числом от 1 до 65535.')
-    required = ['app.py', 'static/index.html', 'static/app.js', 'static/style.css',
+    required = ['app.py', 'static/index.html', 'static/app.js', 'static/style.css', 'static/booklet.js', 'static/booklet.css',
                 'vendor/qrcode-8.2-py3-none-any.whl',
                 'vendor/colorama-0.4.6-py2.py3-none-any.whl']
     missing = [name for name in required if not (ROOT / name).is_file()]

@@ -216,9 +216,9 @@ class Handler(BaseHTTPRequestHandler):
                     sid = int(query.get('id',['0'])[0]); sample(c,sid)
                     base = query.get('base',[''])[0].rstrip('/')
                     return self.send(qr_bytes(base,sid),kind='image/svg+xml')
-            files = {'/':'index.html','/app.js':'app.js','/style.css':'style.css'}
+            files = {'/':'index.html','/app.js':'app.js','/style.css':'style.css','/booklet.js':'booklet.js','/booklet.css':'booklet.css'}
             if path in files:
-                mime = {'/':'text/html','/app.js':'application/javascript','/style.css':'text/css'}[path]
+                mime = {'/':'text/html','/app.js':'application/javascript','/style.css':'text/css','/booklet.js':'application/javascript','/booklet.css':'text/css'}[path]
                 return self.send((ROOT/'static'/files[path]).read_bytes(),kind=mime+'; charset=utf-8')
             raise LookupError('Страница не найдена')
         except LookupError as e: self.send({'error':str(e)},404)
