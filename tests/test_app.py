@@ -25,7 +25,7 @@ class WorkflowTest(unittest.TestCase):
     def request(self,path,data=None):
         req=urllib.request.Request(self.url+path,data=None if data is None else json.dumps(data).encode(),headers={'Content-Type':'application/json'})
         try:
-            with urllib.request.urlopen(req) as res:
+            with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req) as res:
                 raw=res.read();return res.status,json.loads(raw) if res.headers.get_content_type()=='application/json' else raw
         except urllib.error.HTTPError as e:return e.code,json.loads(e.read())
     def create(self,**kw):

@@ -1,7 +1,7 @@
 const $ = s => document.querySelector(s);
 const statuses = ['Запланирована','Отобрана','Передана в лабораторию','В анализе','Результаты готовы'];
 const esc = v => String(v ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-let samples = [], current = null, toastTimer;
+let samples = [], current = null, toastTimer, filteredSamples = [], pageIndex = 0, batchKey;
 function toast(message) { $('#toast').textContent=message;$('#toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('#toast').hidden=true,5000); }
 async function api(path, data) {
   const res=await fetch(path,data===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
@@ -16,12 +16,22 @@ function render(){
   const counts=[samples.length,samples.filter(s=>s.status===0).length,samples.filter(s=>s.status>=2&&s.status<=3).length,samples.filter(s=>s.status===4).length];
   $('#stats').innerHTML=['Всего проб','Ожидают отбора','В лаборатории','Результаты готовы'].map((title,i)=>`<div class="stat"><span>${title}</span><i>${['▦','⌖','⚗','✓'][i]}</i><b>${counts[i].toString().padStart(2,'0')}</b></div>`).join('');
   const search=$('#search').value.toLowerCase();const filter=$('#statusFilter').value;
-  const visible=samples.filter(s=>(filter===''||s.status===Number(filter))&&[s.code,s.site,s.profile,s.point].join(' ').toLowerCase().includes(search));
+  const batch=$('#batchFilter').value;
+  filteredSamples=samples.filter(s=>(filter===''||s.status===Number(filter))&&(!batch||s.batch_id===Number(batch))&&[s.code,s.site,s.profile,s.point].join(' ').toLowerCase().includes(search));
+  const pages=Math.max(1,Math.ceil(filteredSamples.length/100));pageIndex=Math.min(pageIndex,pages-1);
+  const visible=filteredSamples.slice(pageIndex*100,(pageIndex+1)*100);
+  $('#pageInfo').textContent=`Страница ${pageIndex+1} из ${pages} · Найдено: ${filteredSamples.length}`;
+  $('#prevPage').disabled=pageIndex===0;$('#nextPage').disabled=pageIndex>=pages-1;
   $('#count').textContent=samples.length;$('#demo').hidden=!!samples.length;
   $('#rows').innerHTML=visible.map(s=>`<tr><td><a href="/?sample=${s.id}" data-open="${s.id}"><strong>${esc(s.code)}</strong></a><small>Точка ${esc(s.point)}</small></td><td>${esc(s.site)}<small>${esc(s.profile)}</small></td><td>${esc(s.material)}</td><td>${badge(s.status)}</td><td><button class="row-open" data-open="${s.id}" aria-label="Открыть ${esc(s.code)}">→</button></td></tr>`).join('');
   $('#empty').hidden=visible.length>0;$('#empty').textContent=samples.length?'По вашему запросу ничего не найдено.':'Проб пока нет. Добавьте первую или загрузите учебный набор.';
 }
-async function refresh(){samples=await api('/api/samples');render();}
+async function refresh(){
+  const data=await Promise.all([api('/api/samples'),api('/api/batches')]);samples=data[0];
+  const selected=$('#batchFilter').value;
+  $('#batchFilter').innerHTML='<option value="">Все серии и одиночные пробы</option>'+data[1].map(b=>`<option value="${b.id}">Серия №${b.id} · ${b.count} проб · ${esc(b.spec.site)}</option>`).join('');
+  $('#batchFilter').value=selected;render();
+}
 function date(v){return new Date(v).toLocaleString('ru-RU');}
 async function openSample(id){
   const s=await api(`/api/samples/${id}`);current=s;
@@ -39,15 +49,51 @@ async function printLabels(list){
   if(!list.length){toast('Сначала добавьте пробы');return;}
   const area=$('#printArea');area.innerHTML=list.map(s=>`<article class="print-label"><img src="${esc(qr(s.id))}" alt="QR"><div><b>${esc(s.code)}</b><p>${esc(s.site)}</p><small>${esc(s.profile)} · ${esc(s.point)}</small><small>${esc(s.material)}</small><small>GeoTrace · учебная проба</small></div></article>`).join('');
   await Promise.all([...area.querySelectorAll('img')].map(img=>img.decode()));
-  const d=$('#detailDialog');const reopen=d.open;if(reopen)d.close();window.print();if(reopen)d.showModal();
+  const opened=[...document.querySelectorAll('dialog[open]')];const url=location.href;opened.forEach(d=>d.close());window.print();opened.forEach(d=>d.showModal());history.replaceState(null,'',url);
 }
 $('#statusFilter').insertAdjacentHTML('beforeend',statuses.map((s,i)=>`<option value="${i}">${s}</option>`).join(''));
-$('#search').oninput=render;$('#statusFilter').onchange=render;
+$('#search').oninput=()=>{pageIndex=0;render();};$('#statusFilter').onchange=$('#batchFilter').onchange=()=>{pageIndex=0;render();};
+$('#prevPage').onclick=()=>{pageIndex--;render();$('.panel .table-wrap').scrollTop=0;};$('#nextPage').onclick=()=>{pageIndex++;render();$('.panel .table-wrap').scrollTop=0;};
 $('#baseUrl').value=localStorage.getItem('geotrace-base')||location.origin;baseHint();$('#baseUrl').onchange=baseHint;
 $('#newSample').onclick=()=>{$('#createForm').reset();$('#createDialog').showModal();};
 $('#createForm').onsubmit=action(async e=>{e.preventDefault();const button=e.target.querySelector('[type="submit"]');button.disabled=true;try{const s=await api('/api/samples',Object.fromEntries(new FormData(e.target)));$('#createDialog').close();await refresh();await openSample(s.id);toast('Проба создана. Номер назначен автоматически.');}finally{button.disabled=false;}});
 $('#demo').onclick=action(async()=>{await api('/api/demo',{});await refresh();toast('Добавлено 8 вымышленных учебных проб');});
-$('#labels').onclick=action(()=>printLabels(samples));
+$('#labels').onclick=()=>{
+  if(!filteredSamples.length){toast('В выборке нет проб');return;}
+  $('#labelCount').textContent=`В выборке: ${filteredSamples.length} проб.`;
+  $('#labelStart').max=filteredSamples.length;$('#labelStart').value=1;$('#labelLimit').value=Math.min(100,filteredSamples.length);
+  $('#labelsDialog').showModal();
+};
+$('#labelsForm').onsubmit=action(async e=>{
+  e.preventDefault();const start=Number($('#labelStart').value),limit=Number($('#labelLimit').value);
+  if(!Number.isInteger(start)||start<1||start>filteredSamples.length||!Number.isInteger(limit)||limit<1||limit>100)throw new Error('Проверьте диапазон печати');
+  await printLabels([...filteredSamples].sort((a,b)=>a.id-b.id).slice(start-1,start-1+limit));
+});
+$('#downloadBatch').onclick=action(async()=>{
+  const id=$('#batchFilter').value;if(!id)throw new Error('Выберите серию в фильтре реестра перед скачиванием');
+  const button=$('#downloadBatch');button.disabled=true;const original=button.textContent;button.textContent='Готовим архив…';
+  try{
+    const res=await fetch(`/api/batches/${id}/qr.zip?base=${encodeURIComponent(base())}`);
+    if(!res.ok){const data=await res.json();throw new Error(data.error||'Ошибка скачивания');}
+    const blob=await res.blob();const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`GeoTrace-batch-${id}.zip`;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);toast('Архив готов');
+  }finally{button.disabled=false;button.textContent=original;}
+});
+function batchPreview(){
+  const f=$('#batchForm'),n=Number(f.elements.profiles.value)*Number(f.elements.per_profile.value);
+  $('#batchPreview').textContent=Number.isInteger(n)&&n>0&&n<=10000?`Будет создано ${n.toLocaleString('ru-RU')} проб. Номера проб назначит база; номера точек начинаются заново в каждом профиле.`:'Укажите параметры: всего от 1 до 10 000 проб.';
+}
+$('#batchForm').oninput=batchPreview;
+$('#newBatch').onclick=()=>{
+  $('#batchForm').reset();batchKey=Array.from(crypto.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,'0')).join('');batchPreview();$('#batchDialog').showModal();
+};
+$('#batchForm').onsubmit=action(async e=>{
+  e.preventDefault();const button=e.target.querySelector('[type="submit"]');button.disabled=true;button.textContent='Создаём серию…';
+  try{
+    const result=await api('/api/batches',{...Object.fromEntries(new FormData(e.target)),request_key:batchKey});
+    $('#batchDialog').close();await refresh();$('#batchFilter').value=String(result.id);$('#search').value='';$('#statusFilter').value='';pageIndex=0;render();
+    toast(`Создана серия №${result.id}: ${result.count} проб (${result.first_code} — ${result.last_code})`);
+  }finally{button.disabled=false;button.textContent='Создать серию';}
+});
 $('#registry').onclick=()=>{if($('#detailDialog').open)$('#detailDialog').close();history.replaceState(null,'','/');};
 document.addEventListener('click',action(async e=>{const close=e.target.closest('.close');if(close){close.closest('dialog').close();return;}const open=e.target.closest('[data-open]');if(open){e.preventDefault();await openSample(open.dataset.open);}}));
 $('#detailDialog').addEventListener('close',()=>{if(!$('#detailDialog').open)history.replaceState(null,'','/');});

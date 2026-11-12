@@ -38,14 +38,14 @@ class LauncherTest(unittest.TestCase):
                 for _ in range(100):
                     if proc.poll() is not None: self.fail(proc.stdout.read().decode('utf-8'))
                     try:
-                        with urllib.request.urlopen(url+'/api/samples',timeout=.3) as res: rows=json.load(res)
+                        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(url+'/api/samples',timeout=.3) as res: rows=json.load(res)
                         break
                     except OSError: time.sleep(.05)
                 else: self.fail('Server did not become ready')
                 if run==0:
                     req=urllib.request.Request(url+'/api/samples',json.dumps(dict(site='Тест',profile='ПР-01',point='001',material='Почва')).encode(),{'Content-Type':'application/json'})
-                    with urllib.request.urlopen(req) as res: sample=json.load(res)
-                    with urllib.request.urlopen(url+f'/api/qr?id={sample["id"]}&base=http://127.0.0.1:{port}') as res:
+                    with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req) as res: sample=json.load(res)
+                    with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(url+f'/api/qr?id={sample["id"]}&base=http://127.0.0.1:{port}') as res:
                         self.assertIn(b'<svg',res.read())
                 else:
                     self.assertEqual(len(rows),1);self.assertEqual(rows[0]['site'],'Тест')

@@ -7,6 +7,9 @@ import math
 import os
 import re
 import sqlite3
+import tempfile
+import zipfile
+import shutil
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -43,6 +46,13 @@ def init_db():
           id INTEGER PRIMARY KEY, sample_id INTEGER NOT NULL REFERENCES samples(id),
           element TEXT NOT NULL, value REAL NOT NULL, unit TEXT NOT NULL,
           method TEXT NOT NULL, qualifier TEXT NOT NULL, at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS batches (
+          id INTEGER PRIMARY KEY, request_key TEXT UNIQUE NOT NULL,
+          spec TEXT NOT NULL, created_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS batch_samples (
+          batch_id INTEGER NOT NULL REFERENCES batches(id),
+          sample_id INTEGER UNIQUE NOT NULL REFERENCES samples(id),
+          PRIMARY KEY(batch_id,sample_id));
         ''')
 
 def text(data, key, required=False, limit=300):
@@ -85,6 +95,65 @@ def sample(c, sid):
     item['results'] = [dict(r) for r in c.execute('SELECT * FROM results WHERE sample_id=? ORDER BY id',(sid,))]
     return item
 
+def integer(data, key, default, maximum):
+    value = data.get(key, default)
+    if isinstance(value, bool) or not re.fullmatch(r'[0-9]{1,9}', str(value)):
+        raise ValueError(f'Ожидается целое число: {key}')
+    value = int(value)
+    if not 1 <= value <= maximum:
+        raise ValueError(f'{key}: допустимо от 1 до {maximum}')
+    return value
+
+
+def batch_info(c, bid):
+    row = c.execute('SELECT id,created_at,spec FROM batches WHERE id=?',(bid,)).fetchone()
+    if row is None: raise LookupError('Серия не найдена')
+    rows = c.execute('SELECT s.id,s.code FROM samples s JOIN batch_samples b ON b.sample_id=s.id WHERE b.batch_id=? ORDER BY s.id',(bid,)).fetchall()
+    return dict(id=bid,created_at=row['created_at'],spec=json.loads(row['spec']),count=len(rows),
+                first_code=rows[0]['code'],last_code=rows[-1]['code'])
+
+
+def create_batch(c, data):
+    key = text(data, 'request_key', True, 64)
+    if not re.fullmatch(r'[a-zA-Z0-9-]{16,64}', key):
+        raise ValueError('Некорректный ключ запроса серии')
+    profiles = integer(data,'profiles',1,10000)
+    per_profile = integer(data,'per_profile',100,10000)
+    start_profile = integer(data,'start_profile',1,1000000)
+    start_point = integer(data,'start_point',1,1000000)
+    if profiles * per_profile > 10000:
+        raise ValueError('Не более 10 000 проб за одну серию')
+    common = {k:text(data,k,k in ('site','material'),2000 if k=='notes' else 300)
+              for k in ('site','material','collector','notes')}
+    prefix = text(data,'profile_prefix',True,100)
+    spec = dict(common,profiles=profiles,per_profile=per_profile,start_profile=start_profile,
+                start_point=start_point,profile_prefix=prefix)
+    encoded = json.dumps(spec,ensure_ascii=False,sort_keys=True)
+    # Serialize writers, reserve all numbers, and commit the whole series together.
+    c.execute('BEGIN IMMEDIATE')
+    previous = c.execute('SELECT id,spec FROM batches WHERE request_key=?',(key,)).fetchone()
+    if previous:
+        if previous['spec'] != encoded:
+            raise ValueError('Этот запрос уже использован. Откройте форму новой серии заново.')
+        return batch_info(c,previous['id'])
+    bid = c.execute('INSERT INTO batches(request_key,spec,created_at) VALUES(?,?,?)',(key,encoded,now())).lastrowid
+    for profile in range(start_profile,start_profile+profiles):
+        for point in range(start_point,start_point+per_profile):
+            sid = create_sample(c,dict(common,profile=f'{prefix}{profile:02d}',point=f'Т-{point:03d}'))
+            c.execute('INSERT INTO batch_samples(batch_id,sample_id) VALUES(?,?)',(bid,sid))
+    return batch_info(c,bid)
+
+
+def qr_bytes(base, sid):
+    u = urlsplit(base)
+    if u.scheme not in ('http','https') or not u.netloc or u.username or u.password or u.query or u.fragment or len(base)>300:
+        raise ValueError('Укажите HTTP(S)-адрес приложения без параметров')
+    qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M,box_size=8,border=4)
+    qr.add_data(f'{base.rstrip("/")}/?sample={sid}');qr.make(fit=True)
+    out = io.BytesIO();qr.make_image(image_factory=qrcode.image.svg.SvgPathImage).save(out)
+    return out.getvalue()
+
+
 class Handler(BaseHTTPRequestHandler):
     def send(self, body, status=200, kind='application/json; charset=utf-8', headers=None):
         if not isinstance(body, bytes):
@@ -103,7 +172,33 @@ class Handler(BaseHTTPRequestHandler):
         try:
             with connection() as c:
                 if path == '/api/samples':
-                    return self.send([dict(r) for r in c.execute('SELECT * FROM samples ORDER BY id DESC')])
+                    return self.send([dict(r) for r in c.execute('SELECT s.*,b.batch_id FROM samples s LEFT JOIN batch_samples b ON b.sample_id=s.id ORDER BY s.id DESC')])
+                if path == '/api/batches':
+                    return self.send([batch_info(c,r['id']) for r in c.execute('SELECT id FROM batches ORDER BY id DESC')])
+                archive = re.fullmatch(r'/api/batches/(\d+)/qr.zip',path)
+                if archive:
+                    bid = int(archive[1]); batch_info(c,bid)
+                    base = parse_qs(urlsplit(self.path).query).get('base',[''])[0].rstrip('/')
+                    rows = c.execute('SELECT s.* FROM samples s JOIN batch_samples b ON b.sample_id=s.id WHERE b.batch_id=? ORDER BY s.id',(bid,)).fetchall()
+                    # Validate before beginning a download; spool large archives to disk.
+                    qr_bytes(base,rows[0]['id'])
+                    with tempfile.SpooledTemporaryFile(max_size=8*1024*1024) as out:
+                        with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as archive_file:
+                            manifest = io.StringIO();manifest.write('\ufeff')
+                            writer = csv.writer(manifest,delimiter=';')
+                            writer.writerow(['Number','Profile','Point','URL'])
+                            for row in rows:
+                                archive_file.writestr(row['code']+'.svg',qr_bytes(base,row['id']))
+                                writer.writerow(["'"+v if v.startswith(('=','+','-','@','\t','\r')) else v for v in [row['code'],row['profile'],row['point'],f'{base}/?sample={row["id"]}']])
+                            archive_file.writestr('registry.csv',manifest.getvalue())
+                        size=out.tell();out.seek(0)
+                        self.send_response(200)
+                        self.send_header('Content-Type','application/zip')
+                        self.send_header('Content-Disposition',f'attachment; filename="GeoTrace-batch-{bid}.zip"')
+                        self.send_header('Content-Length',str(size))
+                        self.send_header('Cache-Control','no-store');self.end_headers()
+                        shutil.copyfileobj(out,self.wfile)
+                    return
                 if re.fullmatch(r'/api/samples/\d+',path):
                     return self.send(sample(c,int(path.rsplit('/',1)[1])))
                 if path == '/api/export':
@@ -120,13 +215,7 @@ class Handler(BaseHTTPRequestHandler):
                     query = parse_qs(urlsplit(self.path).query)
                     sid = int(query.get('id',['0'])[0]); sample(c,sid)
                     base = query.get('base',[''])[0].rstrip('/')
-                    u = urlsplit(base)
-                    if u.scheme not in ('http','https') or not u.netloc or u.username or u.password or u.query or u.fragment or len(base)>300:
-                        raise ValueError('Укажите HTTP(S)-адрес приложения без параметров')
-                    qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M,box_size=8,border=4)
-                    qr.add_data(f'{base}/?sample={sid}');qr.make(fit=True)
-                    out = io.BytesIO();qr.make_image(image_factory=qrcode.image.svg.SvgPathImage).save(out)
-                    return self.send(out.getvalue(),kind='image/svg+xml')
+                    return self.send(qr_bytes(base,sid),kind='image/svg+xml')
             files = {'/':'index.html','/app.js':'app.js','/style.css':'style.css'}
             if path in files:
                 mime = {'/':'text/html','/app.js':'application/javascript','/style.css':'text/css'}[path]
@@ -148,6 +237,10 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(data,dict): raise ValueError('Ожидается объект')
             path = urlsplit(self.path).path
             with connection() as c:
+                if path == '/api/batches':
+                    result = create_batch(c,data)
+                    c.commit()
+                    return self.send(result,201)
                 if path == '/api/samples':
                     sid = create_sample(c,data)
                     return self.send(sample(c,sid),201)
