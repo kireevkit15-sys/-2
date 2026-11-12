@@ -3,7 +3,7 @@ const statuses = ['Запланирована','Отобрана','Переда�
 const esc = v => String(v ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let samples = [], current = null, toastTimer, filteredSamples = [], pageIndex = 0, batchKey;
 function toast(message) { $('#toast').textContent=message;$('#toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('#toast').hidden=true,5000); }
-const APP_VERSION='1.4.1';
+const APP_VERSION='1.5.0';
 function showError(message) {
   const dialog=[...document.querySelectorAll('dialog[open]')].pop();
   let box=dialog?.querySelector('.form-error');
@@ -102,16 +102,36 @@ $('#downloadBatch').onclick=action(async()=>{
     const blob=await res.blob();const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`GeoTrace-batch-${id}.zip`;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);toast('Архив готов');
   }finally{button.disabled=false;button.textContent=original;}
 });
+function batchCoordinatePreview(){
+  const f=$('#batchForm'),raw=f.elements.coordinates_text.value.trim();
+  const perProfile=Number(f.elements.per_profile.value),count=Number(f.elements.profiles.value)*perProfile;
+  const box=$('#coordinatePreview');
+  if(!raw){box.textContent='Координаты не заданы — можно создать серию без них.';return true;}
+  const lines=raw.split(/\r?\n/),pairs=[];
+  let problem=lines.length!==count?`Вставлено ${lines.length} строк; нужно ${count} — по одной на каждую пробу.`:'';
+  for(let i=0;i<lines.length;i++){
+    const parts=lines[i].trim().split(/[;\t ]+/),values=parts.map(v=>Number(v.replace(',','.')));
+    const numeric=parts.every(v=>/^[+-]?(?:[0-9]+(?:[.,][0-9]+)?|[.,][0-9]+)$/.test(v));
+    if(parts.length!==2||!numeric||!values.every(Number.isFinite)||Math.abs(values[0])>90||Math.abs(values[1])>180){problem=`Строка ${i+1}: проверьте широту (−90…90) и долготу (−180…180), в десятичных градусах.`;break;}
+    pairs.push(values);
+  }
+  box.className=problem?'coordinate-warning':'coordinate-ok';
+  if(problem){box.textContent=problem;return false;}
+  const startProfile=Number(f.elements.start_profile.value),startPoint=Number(f.elements.start_point.value),prefix=f.elements.profile_prefix.value;
+  box.innerHTML=`<p>Проверено ${pairs.length} пар. Первые ${Math.min(5,pairs.length)} проб:</p><div class="table-wrap"><table><thead><tr><th>Профиль</th><th>Точка</th><th>Широта</th><th>Долгота</th></tr></thead><tbody>${pairs.slice(0,5).map(([lat,lon],i)=>`<tr><td>${esc(prefix+String(startProfile+Math.floor(i/perProfile)).padStart(2,'0'))}</td><td>Т-${String(startPoint+i%perProfile).padStart(3,'0')}</td><td>${lat}</td><td>${lon}</td></tr>`).join('')}</tbody></table></div>`;
+  return true;
+}
 function batchPreview(){
+  batchCoordinatePreview();
   const f=$('#batchForm'),n=Number(f.elements.profiles.value)*Number(f.elements.per_profile.value);
   $('#batchPreview').textContent=Number.isInteger(n)&&n>0&&n<=10000?`Будет создано ${n.toLocaleString('ru-RU')} проб. Номера проб назначит база; номера точек начинаются заново в каждом профиле.`:'Укажите параметры: всего от 1 до 10 000 проб.';
 }
-$('#batchForm').oninput=batchPreview;
+$('#batchForm').oninput=()=>{$('#batchDialog .form-error')?.remove();batchPreview();};
 $('#newBatch').onclick=()=>{
   $('#batchForm').reset();batchKey=Array.from(crypto.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,'0')).join('');batchPreview();$('#batchDialog').showModal();
 };
 $('#batchForm').onsubmit=action(async e=>{
-  e.preventDefault();const button=e.target.querySelector('[type="submit"]');button.disabled=true;button.textContent='Создаём серию…';
+  e.preventDefault();if(!batchCoordinatePreview())throw new Error($('#coordinatePreview').textContent);const button=e.target.querySelector('[type="submit"]');button.disabled=true;button.textContent='Создаём серию…';
   try{
     const result=await api('/api/batches',{...Object.fromEntries(new FormData(e.target)),request_key:batchKey});
     $('#batchDialog').close();await refresh();$('#batchFilter').value=String(result.id);$('#search').value='';$('#statusFilter').value='';pageIndex=0;render();
@@ -119,7 +139,7 @@ $('#batchForm').onsubmit=action(async e=>{
   }finally{button.disabled=false;button.textContent='Создать серию';}
 });
 $('#registry').onclick=()=>{if($('#detailDialog').open)$('#detailDialog').close();history.replaceState(null,'','/');};
-document.addEventListener('click',action(async e=>{const close=e.target.closest('.close');if(close){close.closest('dialog').close();return;}const open=e.target.closest('[data-open]');if(open){e.preventDefault();await openSample(open.dataset.open);}}));
+document.addEventListener('click',action(async e=>{const close=e.target.closest('.close');if(close){const dialog=close.closest('dialog');if(dialog.id==='detailDialog')history.replaceState(null,'','/');dialog.close();return;}const open=e.target.closest('[data-open]');if(open){e.preventDefault();await openSample(open.dataset.open);}}));
 $('#detailDialog').addEventListener('close',()=>{if(!$('#detailDialog').open)history.replaceState(null,'','/');});
 (async()=>{try{await checkServer();await refresh();const id=new URLSearchParams(location.search).get('sample');if(id)await openSample(id);}catch(e){showError(e.message);}})();
 $('#fieldbook').onclick=()=>{

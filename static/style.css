@@ -5,3 +5,5 @@
 #bookDialog{width:900px}#bookPreview{width:100%;height:60vh;border:1px solid var(--line);margin-top:16px;border-radius:6px;background:#e7e9e3}@media(max-width:650px){aside #fieldbook{display:block;font-size:10px;padding:6px}aside #labels{font-size:10px;margin-left:0;padding:6px}.brand{font-size:18px}.brand small{font-size:5px}aside{gap:4px}.nav{white-space:nowrap}}
 
 .form-error{background:#fff0e9;border:1px solid #c77755;color:#842c15;padding:14px;border-radius:7px;font-size:13px;white-space:pre-wrap;overflow-wrap:anywhere;margin:12px 0}
+
+.coordinate-input{margin-top:18px}#batchCoordinates{font-family:ui-monospace,monospace}#coordinatePreview{font-size:12px;margin-top:12px;overflow:auto}#coordinatePreview td,#coordinatePreview th{padding:7px 10px}.coordinate-warning{color:#842c15;background:#fff0e9;padding:10px;border-radius:6px}.coordinate-ok{color:#315c48}

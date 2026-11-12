@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import hashlib
 import sqlite3
 from contextlib import contextmanager
 import tempfile
@@ -18,7 +19,7 @@ from urllib.parse import parse_qs, urlsplit
 import qrcode
 import qrcode.image.svg
 
-APP_VERSION = '1.4.1'
+APP_VERSION = '1.5.0'
 ROOT = Path(__file__).resolve().parent
 DB = Path(os.environ.get('GEOCHEM_DB', ROOT / 'data' / 'samples.sqlite3'))
 STATUSES = ['Запланирована', 'Отобрана', 'Передана в лабораторию', 'В анализе', 'Результаты готовы']
@@ -123,6 +124,32 @@ def batch_info(c, bid):
                 first_code=rows[0]['code'],last_code=rows[-1]['code'])
 
 
+def parse_batch_coordinates(data, count):
+    raw = data.get('coordinates_text', '')
+    if not isinstance(raw, str) or len(raw)>1000000:
+        raise ValueError('Список координат должен быть текстом до 1 000 000 символов')
+    if not raw.strip(): return []
+    lines = raw.strip().splitlines()
+    if len(lines)!=count:
+        raise ValueError(f'Координат: {len(lines)} строк, проб: {count}. Нужна одна строка на каждую пробу.')
+    result=[]
+    for i,line in enumerate(lines,1):
+        cells=re.split(r'[;\t ]+',line.strip())
+        if len(cells)!=2:
+            raise ValueError(f'Строка координат {i}: укажите широту и долготу через пробел, табуляцию или точку с запятой.')
+        try:
+            # Decimal degrees only; a decimal comma is accepted for Excel/Russian locale.
+            if not all(re.fullmatch(r'[+-]?(?:[0-9]+(?:[.,][0-9]+)?|[.,][0-9]+)',v) for v in cells):
+                raise ValueError()
+            lat,lon=(float(v.replace(',','.')) for v in cells)
+            if not math.isfinite(lat) or not math.isfinite(lon) or abs(lat)>90 or abs(lon)>180:
+                raise ValueError()
+        except ValueError:
+            raise ValueError(f'Строка координат {i}: нужны десятичные градусы WGS84; широта от −90 до 90, долгота от −180 до 180.')
+        result.append((lat,lon))
+    return result
+
+
 def create_batch(c, data):
     key = text(data, 'request_key', True, 64)
     if not re.fullmatch(r'[a-zA-Z0-9-]{16,64}', key):
@@ -138,6 +165,10 @@ def create_batch(c, data):
     prefix = text(data,'profile_prefix',True,100)
     spec = dict(common,profiles=profiles,per_profile=per_profile,start_profile=start_profile,
                 start_point=start_point,profile_prefix=prefix)
+    coordinates = parse_batch_coordinates(data,profiles*per_profile)
+    if coordinates:
+        spec['coordinate_count']=len(coordinates)
+        spec['coordinates_sha256']=hashlib.sha256(json.dumps(coordinates,separators=(',',':')).encode()).hexdigest()
     encoded = json.dumps(spec,ensure_ascii=False,sort_keys=True)
     # Serialize writers, reserve all numbers, and commit the whole series together.
     c.execute('BEGIN IMMEDIATE')
@@ -149,7 +180,9 @@ def create_batch(c, data):
     bid = c.execute('INSERT INTO batches(request_key,spec,created_at) VALUES(?,?,?)',(key,encoded,now())).lastrowid
     for profile in range(start_profile,start_profile+profiles):
         for point in range(start_point,start_point+per_profile):
-            sid = create_sample(c,dict(common,profile=f'{prefix}{profile:02d}',point=f'Т-{point:03d}'))
+            index=(profile-start_profile)*per_profile+(point-start_point)
+            lat,lon=coordinates[index] if coordinates else (None,None)
+            sid = create_sample(c,dict(common,profile=f'{prefix}{profile:02d}',point=f'Т-{point:03d}',latitude=lat,longitude=lon))
             c.execute('INSERT INTO batch_samples(batch_id,sample_id) VALUES(?,?)',(bid,sid))
     return batch_info(c,bid)
 
@@ -247,7 +280,8 @@ class Handler(BaseHTTPRequestHandler):
             if origin and urlsplit(origin).netloc != self.headers.get('Host'):
                 return self.send({'error':'Запрос с другого сайта запрещён'},403)
             size = int(self.headers.get('Content-Length','0'))
-            if size < 1 or size > 20000: raise ValueError('Некорректный размер запроса')
+            limit = 2000000 if urlsplit(self.path).path == '/api/batches' else 20000
+            if size < 1 or size > limit: raise ValueError('Некорректный размер запроса')
             if self.headers.get_content_type() != 'application/json': raise ValueError('Ожидается JSON')
             data = json.loads(self.rfile.read(size))
             if not isinstance(data,dict): raise ValueError('Ожидается объект')
