@@ -5,6 +5,8 @@ import os
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
+import sqlite3
 import urllib.request
 import urllib.error
 from pathlib import Path
@@ -31,6 +33,13 @@ class WorkflowTest(unittest.TestCase):
     def create(self,**kw):
         data=dict(site='Участок',profile='ПР-01',point='001',material='Почва');data.update(kw)
         status,s=self.request('/api/samples',data);self.assertEqual(status,201);return s
+    def test_health_and_database_error_response(self):
+        status,health=self.request('/api/health')
+        self.assertEqual(status,200);self.assertEqual(health['version'],app.APP_VERSION)
+        with patch.object(app,'connection',side_effect=sqlite3.OperationalError('database is locked')):
+            status,body=self.request('/api/samples',dict(site='test',profile='1',point='1',material='soil'))
+        self.assertEqual(status,503);self.assertIn('database is locked',body['error'])
+
     def test_lifecycle_and_results(self):
         s=self.create();url=f'/api/samples/{s["id"]}'
         self.assertEqual(self.request(url+'/status',{'status':3})[0],400)

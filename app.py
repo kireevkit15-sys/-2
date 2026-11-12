@@ -7,6 +7,7 @@ import math
 import os
 import re
 import sqlite3
+from contextlib import contextmanager
 import tempfile
 import zipfile
 import shutil
@@ -17,6 +18,7 @@ from urllib.parse import parse_qs, urlsplit
 import qrcode
 import qrcode.image.svg
 
+APP_VERSION = '1.4.1'
 ROOT = Path(__file__).resolve().parent
 DB = Path(os.environ.get('GEOCHEM_DB', ROOT / 'data' / 'samples.sqlite3'))
 STATUSES = ['Запланирована', 'Отобрана', 'Передана в лабораторию', 'В анализе', 'Результаты готовы']
@@ -24,11 +26,19 @@ STATUSES = ['Запланирована', 'Отобрана', 'Передана 
 def now():
     return datetime.now(timezone.utc).isoformat(timespec='seconds')
 
+@contextmanager
 def connection():
     con = sqlite3.connect(DB, timeout=15)
     con.row_factory = sqlite3.Row
     con.execute('PRAGMA foreign_keys = ON')
-    return con
+    try:
+        yield con
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
 
 def init_db():
     DB.parent.mkdir(parents=True, exist_ok=True)
@@ -162,6 +172,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Content-Type',kind)
         self.send_header('Content-Length',str(len(body)))
         self.send_header('X-Content-Type-Options','nosniff')
+        self.send_header('X-GeoTrace-Version',APP_VERSION)
         self.send_header('Cache-Control','no-store')
         for k,v in (headers or {}).items(): self.send_header(k,v)
         self.end_headers()
@@ -170,6 +181,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlsplit(self.path).path
         try:
+            if path == '/api/health':
+                return self.send({'app':'GeoTrace','version':APP_VERSION})
             with connection() as c:
                 if path == '/api/samples':
                     return self.send([dict(r) for r in c.execute('SELECT s.*,b.batch_id FROM samples s LEFT JOIN batch_samples b ON b.sample_id=s.id ORDER BY s.id DESC')])
@@ -221,6 +234,9 @@ class Handler(BaseHTTPRequestHandler):
                 mime = {'/':'text/html','/app.js':'application/javascript','/style.css':'text/css','/booklet.js':'application/javascript','/booklet.css':'text/css'}[path]
                 return self.send((ROOT/'static'/files[path]).read_bytes(),kind=mime+'; charset=utf-8')
             raise LookupError('Страница не найдена')
+        except sqlite3.Error as e:
+            self.log_error('Database error: %s',e)
+            self.send({'error':'Не удалось сохранить или прочитать базу данных. Закройте другие окна сервера GeoTrace; проверьте доступ на запись к папке data. Подробности: '+str(e)},503)
         except LookupError as e: self.send({'error':str(e)},404)
         except (ValueError,TypeError) as e: self.send({'error':str(e)},400)
 
@@ -243,7 +259,9 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send(result,201)
                 if path == '/api/samples':
                     sid = create_sample(c,data)
-                    return self.send(sample(c,sid),201)
+                    result = sample(c,sid)
+                    c.commit()
+                    return self.send(result,201)
                 if path == '/api/demo':
                     if c.execute('SELECT count(*) FROM samples').fetchone()[0]:
                         raise ValueError('Учебный набор можно добавить только в пустую базу')
@@ -254,6 +272,7 @@ class Handler(BaseHTTPRequestHandler):
                         c.execute('UPDATE samples SET status=? WHERE id=?',(stage,sid))
                         if stage==4:
                             c.execute('INSERT INTO results(sample_id,element,value,unit,method,qualifier,at) VALUES(?,?,?,?,?,?,?)',(sid,'Cu',42.5,'мг/кг','ICP-MS','=','2026-11-10T10:00:00+00:00'))
+                    c.commit()
                     return self.send({'ok':True},201)
                 m = re.fullmatch(r'/api/samples/(\d+)/(status|results)',path)
                 if not m: raise LookupError('Маршрут не найден')
@@ -272,7 +291,12 @@ class Handler(BaseHTTPRequestHandler):
                     qualifier = data.get('qualifier','=')
                     if qualifier not in ('=','<'): raise ValueError('Некорректный квалификатор')
                     c.execute('INSERT INTO results(sample_id,element,value,unit,method,qualifier,at) VALUES(?,?,?,?,?,?,?)',(sid,text(data,'element',True,30),value,text(data,'unit',True,30),text(data,'method',True,100),qualifier,now()))
-                return self.send(sample(c,sid))
+                result = sample(c,sid)
+                c.commit()
+                return self.send(result)
+        except sqlite3.Error as e:
+            self.log_error('Database error: %s',e)
+            self.send({'error':'Не удалось сохранить или прочитать базу данных. Закройте другие окна сервера GeoTrace; проверьте доступ на запись к папке data. Подробности: '+str(e)},503)
         except LookupError as e: self.send({'error':str(e)},404)
         except (ValueError,TypeError,OverflowError) as e: self.send({'error':str(e)},400)
 
